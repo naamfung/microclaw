@@ -514,6 +514,74 @@ async fn resolve_bot_user_id(bot_token: &str) -> Result<String, String> {
 }
 
 /// Send a text response to a Slack channel, splitting at 4000 chars.
+/// Download the first image from a Slack `files` array and return it as (base64, media_type).
+/// Slack requires the bot token as a Bearer header to access `url_private`.
+async fn download_first_slack_image(
+    bot_token: &str,
+    files: &[serde_json::Value],
+) -> Option<(String, String)> {
+    for file in files {
+        let mimetype = file
+            .get("mimetype")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !mimetype.starts_with("image/") {
+            continue;
+        }
+        let url = file
+            .get("url_private")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if url.is_empty() {
+            continue;
+        }
+        let client = reqwest::Client::new();
+        match client
+            .get(url)
+            .header("Authorization", format!("Bearer {bot_token}"))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.bytes().await {
+                    Ok(bytes) => {
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        let media_type = guess_slack_image_media_type(&bytes, mimetype);
+                        return Some((b64, media_type));
+                    }
+                    Err(e) => {
+                        warn!("Slack: failed to read image bytes: {e}");
+                    }
+                }
+            }
+            Ok(resp) => {
+                warn!("Slack: image download returned HTTP {}", resp.status());
+            }
+            Err(e) => {
+                warn!("Slack: failed to download image: {e}");
+            }
+        }
+    }
+    None
+}
+
+fn guess_slack_image_media_type(data: &[u8], mimetype: &str) -> String {
+    if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        "image/png".into()
+    } else if data.starts_with(&[0xFF, 0xD8]) {
+        "image/jpeg".into()
+    } else if data.starts_with(b"GIF") {
+        "image/gif".into()
+    } else if data.starts_with(b"RIFF") && data.len() >= 12 && &data[8..12] == b"WEBP" {
+        "image/webp".into()
+    } else if !mimetype.is_empty() {
+        mimetype.into()
+    } else {
+        "image/jpeg".into()
+    }
+}
+
 async fn send_slack_response(
     bot_token: &str,
     channel: &str,
@@ -718,7 +786,14 @@ async fn run_socket_mode(
                             .unwrap_or("")
                             .to_string();
 
-                        if channel.is_empty() || text_content.is_empty() {
+                        // Extract inbound file attachments (images)
+                        let files: Vec<serde_json::Value> = event
+                            .get("files")
+                            .and_then(|f| f.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+
+                        if channel.is_empty() || (text_content.is_empty() && files.is_empty()) {
                             continue;
                         }
                         if thread_ts.is_none() && is_dm {
@@ -744,6 +819,7 @@ async fn run_socket_mode(
                                 is_app_mention,
                                 thread_ts.as_deref(),
                                 &ts,
+                                files,
                             )
                             .await;
                         });
@@ -778,7 +854,10 @@ async fn handle_slack_message(
     is_app_mention: bool,
     thread_ts: Option<&str>,
     ts: &str,
+    files: Vec<serde_json::Value>,
 ) {
+    // Download the first image attachment (if any) to pass to the agent as vision input
+    let image_data = download_first_slack_image(bot_token, &files).await;
     let normalized_thread_ts = normalize_slack_thread_ts(thread_ts);
     let external_chat_id = slack_external_chat_id(channel, normalized_thread_ts);
     let chat_type = if is_dm { "slack_dm" } else { "slack" };
@@ -912,7 +991,7 @@ async fn handle_slack_message(
             chat_type: if is_dm { "private" } else { "group" },
         },
         None,
-        None,
+        image_data,
         Some(&event_tx),
     )
     .await
