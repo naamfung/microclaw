@@ -21,7 +21,7 @@ function Resolve-Arch {
 
 function Select-AssetUrl([object]$release, [string]$arch) {
   $patterns = @(
-    "microclaw-v?[0-9]+\.[0-9]+\.[0-9]+-$arch-pc-windows-msvc\.zip$",
+    "microclaw-v?[0-9]+\.[0-9]+\.[0-9]+-$arch-(windows-msvc|pc-windows-msvc)\.zip$",
     "microclaw-v?[0-9]+\.[0-9]+\.[0-9]+-.*$arch.*windows.*\.zip$"
   )
 
