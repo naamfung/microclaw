@@ -315,6 +315,7 @@ fn should_skip_slack_message_subtype(subtype: Option<&str>) -> bool {
     match subtype {
         None => false,
         Some("thread_broadcast") | Some("reply_broadcast") => false,
+        Some("file_share") => false, // file/image attachments from users
         Some(_) => true,
     }
 }
@@ -792,6 +793,15 @@ async fn run_socket_mode(
                             .and_then(|f| f.as_array())
                             .cloned()
                             .unwrap_or_default();
+
+                        info!(
+                            "Slack event: channel={} text={:?} files={} subtype={:?} event_type={}",
+                            channel,
+                            text_content,
+                            files.len(),
+                            subtype,
+                            event_type
+                        );
 
                         if channel.is_empty() || (text_content.is_empty() && files.is_empty()) {
                             continue;
