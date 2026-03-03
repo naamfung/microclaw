@@ -136,6 +136,13 @@ jobs:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
 
     steps:
+      - name: Checkout tag (full history for tag range)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          fetch-tags: true
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -146,12 +153,36 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          PREV_TAG="$(git tag --list 'v*' --sort=-version:refname | awk -v current="${RELEASE_TAG}" '$0 != current { print; exit }')"
+          if [[ -n "${PREV_TAG}" ]]; then
+            echo "Generating release notes from range: ${PREV_TAG}..${RELEASE_TAG}"
+          else
+            echo "Generating release notes without a previous tag (first release or missing tags)"
+          fi
+
+          NOTES_FILE="$(mktemp)"
+          GENERATE_ARGS=(
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes"
+            -f "tag_name=${RELEASE_TAG}"
+          )
+          if [[ -n "${PREV_TAG}" ]]; then
+            GENERATE_ARGS+=(-f "previous_tag_name=${PREV_TAG}")
+          fi
+          "${GENERATE_ARGS[@]}" --jq '.body' > "${NOTES_FILE}"
+
           if ! gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release create "${RELEASE_TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
               -t "${RELEASE_TAG}" \
-              -n "MicroClaw ${RELEASE_TAG}"
+              --notes-file "${NOTES_FILE}"
+          else
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              -t "${RELEASE_TAG}" \
+              --notes-file "${NOTES_FILE}"
           fi
+
+          rm -f "${NOTES_FILE}"
 
       - name: Upload assets
         env:
