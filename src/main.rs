@@ -106,7 +106,7 @@ fn print_version() {
 }
 
 fn handle_upgrade_cli() -> anyhow::Result<()> {
-    let repo = std::env::var("MICROCLAW_REPO").unwrap_or_else(|_| "microclaw/microclaw".into());
+    let repo = "microclaw/microclaw";
     println!("Current version: {VERSION}");
     println!("Upgrading from latest release of {repo}...");
 
