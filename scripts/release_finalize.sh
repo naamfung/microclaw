@@ -51,7 +51,10 @@ wait_for_ci_success() {
   local timeout_seconds="${CI_WAIT_TIMEOUT_SECONDS:-6000}"
   local interval_seconds="${CI_WAIT_INTERVAL_SECONDS:-20}"
   local elapsed=0
-  local required_jobs_json='["Web Build","Rust (ubuntu-latest)","Rust (macos-latest)"]'
+  local required_jobs_json='["Web Build","Rust (ubuntu-latest)","Rust (macos-latest)","Stability Smoke"]'
+  local required_job_count
+
+  required_job_count="$(jq -r 'length' <<<"$required_jobs_json")"
 
   echo "Waiting for required CI jobs on commit: $commit_sha"
   while [ "$elapsed" -lt "$timeout_seconds" ]; do
@@ -110,7 +113,7 @@ wait_for_ci_success() {
       ' <<<"$jobs_json"
     )"
 
-    if [ "$completed_required_count" -eq 3 ]; then
+    if [ "$completed_required_count" -eq "$required_job_count" ]; then
       echo "Required CI jobs succeeded. Run id: $run_id"
       return 0
     fi
