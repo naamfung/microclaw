@@ -3211,6 +3211,12 @@ impl SetupApp {
     ) {
         let show_legacy_fields =
             self.llm_override_uses_legacy_fields(&provider_key, &api_key_key, &base_url_key);
+        if !show_legacy_fields {
+            self.llm_override_page = None;
+            self.open_llm_override_provider_picker_for_key(&provider_key);
+            self.status = "Selecting LLM provider profile override".to_string();
+            return;
+        }
         self.llm_override_page = Some(LlmOverridePage {
             title,
             provider_key,
@@ -3225,18 +3231,26 @@ impl SetupApp {
     }
 
     fn open_llm_override_provider_picker(&mut self) {
-        let Some(page) = self.llm_override_page.as_ref() else {
+        let Some(provider_key) = self
+            .llm_override_page
+            .as_ref()
+            .map(|page| page.provider_key.clone())
+        else {
             return;
         };
-        let current = self.field_value(&page.provider_key);
+        self.open_llm_override_provider_picker_for_key(&provider_key);
+    }
+
+    fn open_llm_override_provider_picker_for_key(&mut self, target_key: &str) {
+        let current = self.field_value(target_key);
         let options = self.llm_provider_preset_choices(&current);
         let selected = options
             .iter()
             .position(|(_, value)| value.eq_ignore_ascii_case(&current))
             .unwrap_or(0);
         self.llm_override_picker = Some(LlmOverridePicker {
-            title: "Select LLM Preset".to_string(),
-            target_key: page.provider_key.clone(),
+            title: "Select LLM Provider Profile".to_string(),
+            target_key: target_key.to_string(),
             options,
             selected,
         });
@@ -3250,7 +3264,19 @@ impl SetupApp {
             return;
         };
         self.set_field_value(&picker.target_key, value.clone());
-        self.status = format!("Updated {}", picker.target_key);
+        let close_after_select = self
+            .llm_override_page
+            .as_ref()
+            .map(|page| !page.show_legacy_fields)
+            .unwrap_or(false);
+        if close_after_select {
+            self.llm_override_page = None;
+        }
+        self.status = if value.trim().is_empty() {
+            "Selected main (global default)".to_string()
+        } else {
+            format!("Selected provider profile: {value}")
+        };
     }
 
     fn llm_override_keys_for_page(page: &LlmOverridePage) -> Vec<&str> {
@@ -3266,7 +3292,7 @@ impl SetupApp {
         if field_key == "TELEGRAM_MODEL" {
             self.open_llm_override_page(
                 "Telegram Channel LLM Override".to_string(),
-                telegram_llm_provider_key().to_string(),
+                "TELEGRAM_MODEL".to_string(),
                 telegram_llm_api_key_key().to_string(),
                 telegram_llm_base_url_key().to_string(),
             );
@@ -3275,7 +3301,7 @@ impl SetupApp {
         if field_key == "DISCORD_MODEL" {
             self.open_llm_override_page(
                 "Discord Channel LLM Override".to_string(),
-                discord_llm_provider_key().to_string(),
+                "DISCORD_MODEL".to_string(),
                 discord_llm_api_key_key().to_string(),
                 discord_llm_base_url_key().to_string(),
             );
@@ -3285,7 +3311,7 @@ impl SetupApp {
             if field_key == telegram_slot_model_key(slot) {
                 self.open_llm_override_page(
                     format!("Telegram Bot #{slot} LLM Override"),
-                    dynamic_slot_llm_provider_key("telegram", slot),
+                    telegram_slot_model_key(slot),
                     dynamic_slot_llm_api_key_key("telegram", slot),
                     dynamic_slot_llm_base_url_key("telegram", slot),
                 );
@@ -3298,7 +3324,7 @@ impl SetupApp {
                 if field_key == model_key {
                     self.open_llm_override_page(
                         format!("{} bot #{slot} LLM Override", ch.name),
-                        dynamic_slot_llm_provider_key(ch.name, slot),
+                        model_key.clone(),
                         dynamic_slot_llm_api_key_key(ch.name, slot),
                         dynamic_slot_llm_base_url_key(ch.name, slot),
                     );
@@ -3311,50 +3337,50 @@ impl SetupApp {
 
     fn llm_provider_key_for_model_field(field_key: &str) -> Option<String> {
         if field_key == "TELEGRAM_MODEL" {
-            return Some(telegram_llm_provider_key().to_string());
+            return Some("TELEGRAM_MODEL".to_string());
         }
         if field_key == "DISCORD_MODEL" {
-            return Some(discord_llm_provider_key().to_string());
+            return Some("DISCORD_MODEL".to_string());
         }
         for slot in 1..=MAX_BOT_SLOTS {
             if field_key == telegram_slot_model_key(slot) {
-                return Some(dynamic_slot_llm_provider_key("telegram", slot));
+                return Some(telegram_slot_model_key(slot));
             }
         }
         for ch in DYNAMIC_CHANNELS {
             for slot in 1..=MAX_BOT_SLOTS {
                 if field_key == dynamic_slot_field_key(ch.name, slot, "model") {
-                    return Some(dynamic_slot_llm_provider_key(ch.name, slot));
+                    return Some(dynamic_slot_field_key(ch.name, slot, "model"));
                 }
             }
         }
         None
     }
 
-    fn llm_override_related_keys_for_model_field(field_key: &str) -> Option<[String; 4]> {
+    fn llm_override_related_keys_for_model_field(field_key: &str) -> Option<Vec<String>> {
         if field_key == "TELEGRAM_MODEL" {
-            return Some([
+            return Some(vec![
+                "TELEGRAM_MODEL".to_string(),
                 telegram_llm_provider_key().to_string(),
                 telegram_llm_api_key_key().to_string(),
                 telegram_llm_base_url_key().to_string(),
-                "TELEGRAM_MODEL".to_string(),
             ]);
         }
         if field_key == "DISCORD_MODEL" {
-            return Some([
+            return Some(vec![
+                "DISCORD_MODEL".to_string(),
                 discord_llm_provider_key().to_string(),
                 discord_llm_api_key_key().to_string(),
                 discord_llm_base_url_key().to_string(),
-                "DISCORD_MODEL".to_string(),
             ]);
         }
         for slot in 1..=MAX_BOT_SLOTS {
             if field_key == telegram_slot_model_key(slot) {
-                return Some([
+                return Some(vec![
+                    telegram_slot_model_key(slot),
                     dynamic_slot_llm_provider_key("telegram", slot),
                     dynamic_slot_llm_api_key_key("telegram", slot),
                     dynamic_slot_llm_base_url_key("telegram", slot),
-                    telegram_slot_model_key(slot),
                 ]);
             }
         }
@@ -3362,11 +3388,11 @@ impl SetupApp {
             for slot in 1..=MAX_BOT_SLOTS {
                 let model_key = dynamic_slot_field_key(ch.name, slot, "model");
                 if field_key == model_key {
-                    return Some([
+                    return Some(vec![
+                        model_key.clone(),
                         dynamic_slot_llm_provider_key(ch.name, slot),
                         dynamic_slot_llm_api_key_key(ch.name, slot),
                         dynamic_slot_llm_base_url_key(ch.name, slot),
-                        model_key,
                     ]);
                 }
             }
@@ -6882,34 +6908,35 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
             frame.render_widget(Clear, overlay_area);
             frame.render_widget(overlay, overlay_area);
         }
+    } else if let Some(picker) = &app.llm_override_picker {
+        let overlay_area = frame.area().inner(Margin::new(6, 3));
+        let mut list_lines = Vec::with_capacity(picker.options.len());
+        for (i, (label, _)) in picker.options.iter().enumerate() {
+            let selected = i == picker.selected;
+            let pointer = if selected { "▶ " } else { "  " };
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            list_lines.push(Line::from(Span::styled(format!("{pointer}{label}"), style)));
+        }
+        let overlay = Paragraph::new(list_lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(picker.title.as_str())
+                    .style(Style::default().bg(Color::Black)),
+            )
+            .style(Style::default().bg(Color::Black))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(Clear, overlay_area);
+        frame.render_widget(overlay, overlay_area);
     } else if let Some(page) = &app.llm_override_page {
         let overlay_area = frame.area().inner(Margin::new(6, 3));
-        if let Some(picker) = &app.llm_override_picker {
-            let mut list_lines = Vec::with_capacity(picker.options.len());
-            for (i, (label, _)) in picker.options.iter().enumerate() {
-                let selected = i == picker.selected;
-                let pointer = if selected { "▶ " } else { "  " };
-                let style = if selected {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-                list_lines.push(Line::from(Span::styled(format!("{pointer}{label}"), style)));
-            }
-            let overlay = Paragraph::new(list_lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(picker.title.as_str())
-                        .style(Style::default().bg(Color::Black)),
-                )
-                .style(Style::default().bg(Color::Black))
-                .wrap(Wrap { trim: false });
-            frame.render_widget(Clear, overlay_area);
-            frame.render_widget(overlay, overlay_area);
-        } else {
+        {
             let keys = SetupApp::llm_override_keys_for_page(page);
             let mut lines = Vec::new();
             for (idx, key) in keys.iter().enumerate() {
@@ -7438,6 +7465,40 @@ fn run_wizard(mut terminal: DefaultTerminal) -> Result<bool, MicroClawError> {
                         }
                         _ => {}
                     },
+                }
+                continue;
+            }
+
+            if app.llm_override_picker.is_some() && app.llm_override_page.is_none() {
+                match key.code {
+                    KeyCode::Esc => {
+                        app.llm_override_picker = None;
+                        app.status = "Selection closed".into();
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if let Some(picker) = app.llm_override_picker.as_mut() {
+                            picker.selected = picker.selected.saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if let Some(picker) = app.llm_override_picker.as_mut() {
+                            picker.selected =
+                                (picker.selected + 1).min(picker.options.len().saturating_sub(1));
+                        }
+                    }
+                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Some(picker) = app.llm_override_picker.as_mut() {
+                            picker.selected = picker.selected.saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Some(picker) = app.llm_override_picker.as_mut() {
+                            picker.selected =
+                                (picker.selected + 1).min(picker.options.len().saturating_sub(1));
+                        }
+                    }
+                    KeyCode::Enter => app.apply_llm_override_picker_selection(),
+                    _ => {}
                 }
                 continue;
             }
