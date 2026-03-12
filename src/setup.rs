@@ -1022,6 +1022,16 @@ struct ProviderPresetDraft {
     show_thinking: bool,
 }
 
+struct ProviderPresetValidationRequest {
+    profile_id: String,
+    provider: String,
+    api_key: String,
+    base_url: String,
+    user_agent: String,
+    model: String,
+    codex_account_id: Option<String>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProviderPresetPageMode {
     List,
@@ -4289,6 +4299,80 @@ impl SetupApp {
         .map_err(|_| MicroClawError::Config("Validation thread panicked".into()))?
     }
 
+    fn selected_provider_preset_validation_request(
+        &self,
+    ) -> Result<ProviderPresetValidationRequest, MicroClawError> {
+        let Some(page) = self.provider_preset_page.as_ref() else {
+            return Err(MicroClawError::Config(
+                "No provider profile is currently selected".into(),
+            ));
+        };
+        let Some(entry) = page.entries.get(page.selected) else {
+            return Err(MicroClawError::Config(
+                "No provider profile is currently selected".into(),
+            ));
+        };
+
+        let provider = entry.provider.trim().to_ascii_lowercase();
+        if provider.is_empty() {
+            return Err(MicroClawError::Config(
+                "Provider profile must set a provider before testing".into(),
+            ));
+        }
+
+        let configured_api_key = entry.api_key.trim().to_string();
+        let (api_key, codex_account_id) = if is_openai_codex_provider(&provider) {
+            let auth = resolve_openai_codex_auth(&configured_api_key)?;
+            (auth.bearer_token, auth.account_id)
+        } else if provider.eq_ignore_ascii_case("qwen-portal") && configured_api_key.is_empty() {
+            let auth = resolve_qwen_portal_auth("")?;
+            (auth.bearer_token, None)
+        } else {
+            (configured_api_key, None)
+        };
+
+        let base_url = entry.base_url.trim().to_string();
+        let user_agent = entry.user_agent.trim().to_string();
+        let model = if entry.default_model.trim().is_empty() {
+            default_model_for_provider(&provider).to_string()
+        } else {
+            entry.default_model.trim().to_string()
+        };
+
+        Ok(ProviderPresetValidationRequest {
+            profile_id: entry.id.clone(),
+            provider,
+            api_key,
+            base_url,
+            user_agent,
+            model,
+            codex_account_id,
+        })
+    }
+
+    fn validate_selected_provider_preset_online(
+        &self,
+    ) -> Result<(String, Vec<String>), MicroClawError> {
+        let request = self.selected_provider_preset_validation_request()?;
+        let profile_id = request.profile_id.clone();
+        let checks = std::thread::spawn(move || {
+            perform_online_validation(
+                false,
+                "",
+                "",
+                &request.provider,
+                &request.api_key,
+                &request.base_url,
+                &request.user_agent,
+                &request.model,
+                request.codex_account_id.as_deref(),
+            )
+        })
+        .join()
+        .map_err(|_| MicroClawError::Config("Validation thread panicked".into()))??;
+        Ok((profile_id, checks))
+    }
+
     fn set_provider(&mut self, provider: &str) {
         let old_provider = self.field_value("LLM_PROVIDER");
         let old_base_url = self.field_value("LLM_BASE_URL");
@@ -6893,14 +6977,14 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "Enter edit/select · Esc back · ↑/↓ move · Ctrl+D clear",
+                "Enter edit/select · t test current profile · Esc back · ↑/↓ move · Ctrl+D clear",
                 Style::default().fg(Color::White),
             )));
             let overlay = Paragraph::new(lines)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title("Provider Preset Detail")
+                        .title("Provider Profile Detail")
                         .style(Style::default().bg(Color::Black)),
                 )
                 .style(Style::default().bg(Color::Black))
@@ -7293,7 +7377,7 @@ fn run_wizard(mut terminal: DefaultTerminal) -> Result<bool, MicroClawError> {
                                 page.editing = true;
                             }
                             let _ = app.sync_provider_preset_page_field();
-                            app.status = "Added provider preset".into();
+                            app.status = "Added provider profile".into();
                         }
                         KeyCode::Char('c') => match app.clone_selected_provider_preset() {
                             Ok(Some(cloned_id)) => {
@@ -7303,14 +7387,14 @@ fn run_wizard(mut terminal: DefaultTerminal) -> Result<bool, MicroClawError> {
                             Err(e) => app.status = e.to_string(),
                         },
                         KeyCode::Char('d') => match app.delete_selected_provider_preset(false) {
-                            Ok(_) => app.status = "Deleted provider preset".into(),
+                            Ok(_) => app.status = "Deleted provider profile".into(),
                             Err(e) => app.status = e.to_string(),
                         },
                         KeyCode::Char('x') => match app.delete_selected_provider_preset(true) {
                             Ok(reset_refs) => {
                                 if reset_refs.is_empty() {
                                     app.status =
-                                        "Deleted provider preset (no references needed reset)"
+                                        "Deleted provider profile (no references needed reset)"
                                             .into();
                                 } else {
                                     app.status = format!(
@@ -7341,7 +7425,7 @@ fn run_wizard(mut terminal: DefaultTerminal) -> Result<bool, MicroClawError> {
                                 page.editing = false;
                             }
                             let _ = app.sync_provider_preset_page_field();
-                            app.status = "Editing provider preset".into();
+                            app.status = "Editing provider profile".into();
                         }
                         _ => {}
                     },
@@ -7354,7 +7438,42 @@ fn run_wizard(mut terminal: DefaultTerminal) -> Result<bool, MicroClawError> {
                                 } else {
                                     page.mode = ProviderPresetPageMode::List;
                                     page.field_selected = 0;
-                                    app.status = "Back to provider preset list".into();
+                                    app.status = "Back to provider profile list".into();
+                                }
+                            }
+                        }
+                        KeyCode::Char('t') => {
+                            let editing = app
+                                .provider_preset_page
+                                .as_ref()
+                                .map(|page| page.editing)
+                                .unwrap_or(false);
+                            if !editing {
+                                let profile_id = app
+                                    .provider_preset_page
+                                    .as_ref()
+                                    .and_then(|page| page.entries.get(page.selected))
+                                    .map(|entry| entry.id.clone())
+                                    .unwrap_or_else(|| "current".to_string());
+                                let app_for_online = app.clone();
+                                match run_with_spinner(
+                                    &mut terminal,
+                                    &mut app,
+                                    &format!("Testing provider profile {profile_id}"),
+                                    move || {
+                                        app_for_online.validate_selected_provider_preset_online()
+                                    },
+                                ) {
+                                    Ok((validated_profile_id, checks)) => {
+                                        app.status = format!(
+                                            "Profile {validated_profile_id} passed: {}",
+                                            checks.join(" | ")
+                                        );
+                                    }
+                                    Err(e) => {
+                                        app.status =
+                                            format!("Profile {profile_id} test failed: {e}");
+                                    }
                                 }
                             }
                         }
@@ -7404,7 +7523,7 @@ fn run_wizard(mut terminal: DefaultTerminal) -> Result<bool, MicroClawError> {
                                     page.editing = false;
                                 }
                                 let _ = app.sync_provider_preset_page_field();
-                                app.status = "Updated provider preset field".into();
+                                app.status = "Updated provider profile field".into();
                             } else if selected_field == 1 {
                                 app.open_provider_preset_provider_picker();
                             } else if selected_field == 5 {
@@ -7412,10 +7531,10 @@ fn run_wizard(mut terminal: DefaultTerminal) -> Result<bool, MicroClawError> {
                             } else if selected_field == 6 {
                                 app.toggle_selected_provider_preset_show_thinking();
                                 let _ = app.sync_provider_preset_page_field();
-                                app.status = "Toggled provider preset show_thinking".into();
+                                app.status = "Toggled provider profile show_thinking".into();
                             } else if let Some(page) = app.provider_preset_page.as_mut() {
                                 page.editing = true;
-                                app.status = "Editing provider preset field".into();
+                                app.status = "Editing provider profile field".into();
                             }
                         }
                         KeyCode::Backspace => {
@@ -8300,6 +8419,37 @@ subagents:
         assert_eq!(page.entries[1].provider, "anthropic");
         assert_eq!(page.entries[1].default_model, "claude-sonnet-4-5-20250929");
         assert!(page.entries[1].show_thinking);
+    }
+
+    #[test]
+    fn test_selected_provider_preset_validation_request_uses_current_entry_values() {
+        let mut app = SetupApp::new();
+        app.provider_preset_page = Some(ProviderPresetPage {
+            entries: vec![ProviderPresetDraft {
+                id: "provider1".into(),
+                provider: "anthropic".into(),
+                api_key: "sk-test".into(),
+                base_url: "https://example.com/v1".into(),
+                user_agent: "microclaw-test/1.0".into(),
+                default_model: String::new(),
+                show_thinking: false,
+            }],
+            selected: 0,
+            mode: ProviderPresetPageMode::Edit,
+            field_selected: 0,
+            editing: false,
+            picker: None,
+        });
+
+        let request = app.selected_provider_preset_validation_request().unwrap();
+
+        assert_eq!(request.profile_id, "provider1");
+        assert_eq!(request.provider, "anthropic");
+        assert_eq!(request.api_key, "sk-test");
+        assert_eq!(request.base_url, "https://example.com/v1");
+        assert_eq!(request.user_agent, "microclaw-test/1.0");
+        assert_eq!(request.model, "claude-sonnet-4-5-20250929");
+        assert_eq!(request.codex_account_id, None);
     }
 
     #[test]
