@@ -47,6 +47,7 @@ An agentic AI assistant for chat surfaces, inspired by [nanoclaw](https://github
 - [Usage examples](#usage-examples)
 - [Architecture](#architecture)
 - [Adding a New Platform Adapter](#adding-a-new-platform-adapter)
+- [Observability (Langfuse)](#observability-langfuse)
 - [Documentation](#documentation)
 
 ## Install
@@ -1241,6 +1242,77 @@ MicroClaw's core loop is channel-agnostic. A new platform integration should mai
 5. Preserve session key stability so resume/compaction/memory continue to work across restarts.
 6. Apply existing authorization and safety boundaries (`control_chat_ids`, tool constraints, path guard).
 7. Add adapter-specific integration tests under `TEST.md` patterns (DM/private, group/server mention, `/reset`, limits, failures).
+
+## Observability (Langfuse)
+
+MicroClaw supports OpenTelemetry (OTLP)-based observability and provides first-class integration with [Langfuse](https://langfuse.com/). You can trace complete agent runs (`agent_run`), inspect `llm_generation` and `tool_execution` spans, and monitor token usage.
+
+### 5-minute quick start (first-time users)
+
+1. **Deploy Langfuse**
+   - **Cloud**: use `https://cloud.langfuse.com`
+   - **Self-hosted**: follow the official Langfuse self-hosting guide and make sure the UI is reachable (for example `http://127.0.0.1:3000`)
+2. **Create a Langfuse project** and copy:
+   - `langfuse_public_key` (`pk-lf-...`)
+   - `langfuse_secret_key` (`sk-lf-...`)
+3. **Configure MicroClaw** in `microclaw.config.yaml`
+4. **Restart MicroClaw**
+5. **Send one test message** in Web/Telegram/Discord and open Langfuse Traces
+
+### Recommended config
+
+```yaml
+observability:
+  service_name: "microclaw-agent"
+  otlp_tracing_enabled: true
+  langfuse_host: "https://cloud.langfuse.com" # or "http://127.0.0.1:3000" for self-hosted
+  langfuse_public_key: "pk-lf-..."
+  langfuse_secret_key: "sk-lf-..."
+  otlp_tracing_max_queue_size: 8192
+  otlp_tracing_max_export_batch_size: 512
+  otlp_tracing_scheduled_delay_ms: 5000
+```
+
+### Verify it is working
+
+- Start MicroClaw with debug logs:
+
+```sh
+RUST_LOG=info,microclaw_observability=debug,opentelemetry_sdk=info microclaw start
+```
+
+- Look for:
+  - `otlp trace exporter initialized`
+  - `trace span submitted to otel sdk`
+- In Langfuse, verify:
+  - Trace name: `agent_run`
+  - Child spans: `llm_generation`, `tool_execution`
+  - Token usage fields are non-zero after real model output
+
+### Common pitfalls (read this before troubleshooting)
+
+- **Wrong `langfuse_host` value**
+  - Use only host root like `http://127.0.0.1:3000`
+  - Do not use UI path like `/project/<id>/traces`
+  - Do not append `/api/public/otel/v1/traces`
+- **Proxy intercepts local Langfuse traffic**
+  - If logs show proxy intercepting local URL, set:
+
+```sh
+export NO_PROXY=127.0.0.1,localhost,<your-langfuse-host>
+export no_proxy=127.0.0.1,localhost,<your-langfuse-host>
+```
+
+- **Docker networking confusion**
+  - If MicroClaw runs in container, `127.0.0.1` points to that container, not your host
+  - Use a container-reachable hostname (for example `http://langfuse-web:3000`)
+- **No traces after config change**
+  - Restart MicroClaw after editing config
+  - Send a fresh test request
+- **Too noisy OpenTelemetry timer debug logs**
+  - Raise SDK log level: `opentelemetry_sdk=info`
+- **Usage fields look incorrect in older runs**
+  - Old traces are not backfilled; validate with new runs after upgrade
 
 ## Documentation
 

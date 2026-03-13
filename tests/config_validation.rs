@@ -72,6 +72,7 @@ fn minimal_config() -> Config {
         plugins: microclaw::plugins::PluginsConfig::default(),
         voice_provider: "openai".into(),
         voice_transcription_command: None,
+        observability: None,
         channels: std::collections::HashMap::new(),
     }
 }
