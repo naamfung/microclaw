@@ -820,6 +820,11 @@ microclaw start
   - `~/.microclaw/sandbox-mount-allowlist.txt`：沙箱挂载路径白名单。
   - `~/.microclaw/sandbox-path-allowlist.txt`：文件工具路径白名单。
 
+工作目录约定：
+- `bash` 会在当前 chat 工作目录下的 `tmp/` 子目录执行。
+- 优先使用相对路径或当前 chat 工作目录下的路径，不要使用绝对 `/tmp/...`。
+- 如果出现 `command not found`，仍需在宿主安装该依赖，或改用已包含该命令的沙箱镜像。
+
 ### 支持的 `llm_provider` 值
 
 `openai`、`openai-codex`、`openrouter`、`anthropic`、`ollama`、`google`、`alibaba`、`deepseek`、`moonshot`、`mistral`、`azure`、`bedrock`、`zhipu`、`minimax`、`cohere`、`tencent`、`xai`、`huggingface`、`together`、`custom`。

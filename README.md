@@ -1173,6 +1173,11 @@ Notes:
   - `~/.microclaw/sandbox-mount-allowlist.txt` for sandbox mount roots.
   - `~/.microclaw/sandbox-path-allowlist.txt` for file tool path roots.
 
+Working directory guidance:
+- `bash` runs inside the current chat working directory under its `tmp/` subdirectory.
+- Prefer relative paths or paths under the current chat working directory instead of absolute `/tmp/...`.
+- If a command fails with `command not found`, install the dependency on the host or use a sandbox image that includes it.
+
 ### Supported `llm_provider` values
 
 `openai`, `openai-codex`, `openrouter`, `anthropic`, `ollama`, `google`, `alibaba`, `aliyun-bailian`, `nvidia`, `deepseek`, `moonshot`, `mistral`, `azure`, `bedrock`, `zhipu`, `minimax`, `cohere`, `tencent`, `xai`, `huggingface`, `together`, `custom`.
