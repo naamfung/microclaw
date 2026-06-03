@@ -125,6 +125,33 @@ Upgrade in place later:
 microclaw upgrade
 ```
 
+### Linux system requirements
+
+The prebuilt Linux binaries are built against **glibc 2.39** (the toolchain on `ubuntu-latest`) and are **not** statically linked. They run only on a distribution whose system glibc is **2.39 or newer**. On older systems you will see errors like:
+
+```
+microclaw: /lib64/libc.so.6: version `GLIBC_2.39' not found (required by microclaw)
+```
+
+Distributions known to work out of the box:
+
+| Distribution            | glibc | Status |
+| ----------------------- | ----- | ------ |
+| Ubuntu 24.04 LTS+       | 2.39  | ✅ works |
+| Debian 13 (trixie)+     | 2.41  | ✅ works |
+| AlmaLinux / Rocky / RHEL 10+ | 2.39 | ✅ works |
+| Fedora 40+              | 2.39  | ✅ works |
+| Debian 12 (bookworm)    | 2.36  | ❌ too old |
+| AlmaLinux / RHEL 8–9    | 2.28–2.34 | ❌ too old |
+| Ubuntu 22.04 / 20.04    | 2.35 / 2.31 | ❌ too old |
+
+Check your version with `ldd --version`. The binaries also require **OpenSSL 3** (`libssl.so.3`); on distros that still ship OpenSSL 1.1 install the OpenSSL 3 runtime (e.g. `dnf install openssl3-libs`).
+
+On a too-old distribution you have three options:
+1. Upgrade/reinstall to a supported release (e.g. Ubuntu 24.04 or AlmaLinux 10).
+2. Run inside a container with a newer base image (`docker run ... ubuntu:24.04`).
+3. Build from source on the target machine — see [From source](#from-source). A fully static build via the `x86_64-unknown-linux-musl` target removes both the glibc and OpenSSL system dependencies.
+
 ### Preflight diagnostics
 
 Run cross-platform diagnostics before first start (or when troubleshooting):

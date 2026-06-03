@@ -112,6 +112,33 @@ iwr https://microclaw.ai/install.ps1 -UseBasicParsing | iex
 microclaw upgrade
 ```
 
+### Linux 系统要求
+
+预编译的 Linux 二进制是基于 **glibc 2.39**（`ubuntu-latest` 的工具链）构建的，**未做静态链接**，因此只能在系统 glibc 为 **2.39 或更高**的发行版上运行。在更老的系统上会报类似错误：
+
+```
+microclaw: /lib64/libc.so.6: version `GLIBC_2.39' not found (required by microclaw)
+```
+
+开箱即用的发行版：
+
+| 发行版                  | glibc | 状态 |
+| ----------------------- | ----- | ---- |
+| Ubuntu 24.04 LTS+       | 2.39  | ✅ 可用 |
+| Debian 13 (trixie)+     | 2.41  | ✅ 可用 |
+| AlmaLinux / Rocky / RHEL 10+ | 2.39 | ✅ 可用 |
+| Fedora 40+              | 2.39  | ✅ 可用 |
+| Debian 12 (bookworm)    | 2.36  | ❌ 太旧 |
+| AlmaLinux / RHEL 8–9    | 2.28–2.34 | ❌ 太旧 |
+| Ubuntu 22.04 / 20.04    | 2.35 / 2.31 | ❌ 太旧 |
+
+用 `ldd --version` 查看本机版本。二进制还依赖 **OpenSSL 3**（`libssl.so.3`）；仍是 OpenSSL 1.1 的发行版需先安装 OpenSSL 3 运行库（例如 `dnf install openssl3-libs`）。
+
+如果发行版太旧，有三种办法：
+1. 升级/重装到受支持的版本（如 Ubuntu 24.04 或 AlmaLinux 10）。
+2. 用更新的基础镜像在容器里运行（`docker run ... ubuntu:24.04`）。
+3. 在目标机器上从源码构建——见 [从源码构建](#从源码构建)。用 `x86_64-unknown-linux-musl` 目标做全静态构建，可同时摆脱 glibc 和 OpenSSL 的系统依赖。
+
 ### 预检诊断（doctor）
 
 在首次启动或排障时，先运行跨平台诊断：
