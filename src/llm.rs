@@ -1098,7 +1098,8 @@ impl OpenAiProvider {
         let is_openai_codex = is_openai_codex_provider(&config.llm_provider);
         let is_deepseek_provider = config.llm_provider.eq_ignore_ascii_case("deepseek");
         let is_google_provider = config.llm_provider.eq_ignore_ascii_case("google");
-        let enable_reasoning_content_bridge = is_deepseek_provider || is_google_provider;
+        let enable_reasoning_content_bridge =
+            is_google_provider || (config.show_thinking && is_deepseek_provider);
         let enable_thinking_param =
             (is_deepseek_provider || is_google_provider) && config.show_thinking;
         let configured_base = config.llm_base_url.as_deref().unwrap_or("");
@@ -1539,10 +1540,11 @@ impl LlmProvider for OpenAiProvider {
                 .await;
         }
 
+        let sanitized = sanitize_messages(messages);
         let oai_messages = if self.enable_reasoning_content_bridge {
-            translate_messages_to_oai_with_reasoning(system, &messages, true)
+            translate_messages_to_oai_with_reasoning(system, &sanitized, true)
         } else {
-            translate_messages_to_oai(system, &messages)
+            translate_messages_to_oai(system, &sanitized)
         };
 
         let mut body = json!({
@@ -1555,7 +1557,7 @@ impl LlmProvider for OpenAiProvider {
             self.prefer_max_completion_tokens,
         );
         let thinking_enabled =
-            self.enable_thinking_param && !has_visible_reply_runtime_guard(&messages);
+            self.enable_thinking_param && !has_visible_reply_runtime_guard(&sanitized);
         maybe_enable_thinking_param(&mut body, &self.provider, thinking_enabled);
         apply_openai_compat_body_overrides(
             &mut body,
@@ -1687,10 +1689,11 @@ impl LlmProvider for OpenAiProvider {
             return Ok(response);
         }
 
+        let sanitized = sanitize_messages(messages);
         let oai_messages = if self.enable_reasoning_content_bridge {
-            translate_messages_to_oai_with_reasoning(system, &messages, true)
+            translate_messages_to_oai_with_reasoning(system, &sanitized, true)
         } else {
-            translate_messages_to_oai(system, &messages)
+            translate_messages_to_oai(system, &sanitized)
         };
 
         let mut body = json!({
@@ -1704,7 +1707,7 @@ impl LlmProvider for OpenAiProvider {
             self.prefer_max_completion_tokens,
         );
         let thinking_enabled =
-            self.enable_thinking_param && !has_visible_reply_runtime_guard(&messages);
+            self.enable_thinking_param && !has_visible_reply_runtime_guard(&sanitized);
         maybe_enable_thinking_param(&mut body, &self.provider, thinking_enabled);
         apply_openai_compat_body_overrides(
             &mut body,
@@ -1737,7 +1740,7 @@ impl LlmProvider for OpenAiProvider {
             provider = %self.provider,
             model = %model,
             url = %self.chat_url,
-            messages_count = messages.len(),
+            messages_count = sanitized.len(),
             "Sending LLM stream request"
         );
 
@@ -2026,6 +2029,55 @@ fn translate_messages_to_oai_with_reasoning(
 ) -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = Vec::new();
     let mut pending_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Track the index of the last assistant message that had tool_calls
+    // so we can strip orphaned calls when no tool results follow.
+    let mut last_tool_call_assistant_idx: Option<usize> = None;
+
+    // If `pending_tool_ids` is non-empty, the last assistant's tool_calls
+    // were never resolved by subsequent tool results. Strip the tool_calls
+    // from that assistant message to avoid API errors.
+    let strip_orphaned_tool_calls =
+        |out: &mut Vec<serde_json::Value>,
+         pending: &mut std::collections::HashSet<String>,
+         last_idx: &mut Option<usize>| {
+            if !pending.is_empty() {
+                if let Some(idx) = last_idx.take() {
+                    if let Some(obj) = out.get_mut(idx).and_then(|e| e.as_object_mut()) {
+                        // Keep entries whose results were already emitted; dropping the
+                        // whole array would orphan those tool messages instead.
+                        let resolved: Vec<serde_json::Value> = obj
+                            .get("tool_calls")
+                            .and_then(|tc| tc.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter(|tc| {
+                                        tc["id"].as_str().is_none_or(|id| !pending.contains(id))
+                                    })
+                                    .cloned()
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if resolved.is_empty() {
+                            obj.remove("tool_calls");
+                            // On the reasoning-bridge path the assistant's text lives in
+                            // reasoning_content; fold it back into content. On the plain
+                            // path content is already set — leave it untouched.
+                            if let Some(text) = obj
+                                .remove("reasoning_content")
+                                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                            {
+                                obj.insert("content".to_string(), json!(text));
+                            } else if obj.get("content").is_none_or(|c| c.is_null()) {
+                                obj.insert("content".to_string(), json!(""));
+                            }
+                        } else {
+                            obj.insert("tool_calls".to_string(), json!(resolved));
+                        }
+                    }
+                }
+                pending.clear();
+            }
+        };
 
     // System message
     if !system.is_empty() {
@@ -2035,7 +2087,11 @@ fn translate_messages_to_oai_with_reasoning(
     for msg in messages {
         match &msg.content {
             MessageContent::Text(text) => {
-                pending_tool_ids.clear();
+                strip_orphaned_tool_calls(
+                    &mut out,
+                    &mut pending_tool_ids,
+                    &mut last_tool_call_assistant_idx,
+                );
                 out.push(json!({"role": msg.role, "content": text}));
             }
             MessageContent::Blocks(blocks) => {
@@ -2088,6 +2144,14 @@ fn translate_messages_to_oai_with_reasoning(
                         })
                         .collect();
 
+                    // If the previous assistant's tool_calls were never resolved,
+                    // strip them before emitting a new assistant.
+                    strip_orphaned_tool_calls(
+                        &mut out,
+                        &mut pending_tool_ids,
+                        &mut last_tool_call_assistant_idx,
+                    );
+
                     let mut m = json!({"role": "assistant"});
                     if include_reasoning_for_tool_calls && !tool_calls.is_empty() {
                         m["reasoning_content"] = json!(text);
@@ -2099,7 +2163,9 @@ fn translate_messages_to_oai_with_reasoning(
                         m["tool_calls"] = json!(tool_calls);
                     }
                     out.push(m);
+                    let has_any = !assistant_tool_ids.is_empty();
                     pending_tool_ids = assistant_tool_ids;
+                    last_tool_call_assistant_idx = if has_any { Some(out.len() - 1) } else { None };
                 } else {
                     // User role — tool_results, images, or text
                     let has_tool_results = blocks
@@ -2134,7 +2200,11 @@ fn translate_messages_to_oai_with_reasoning(
                             }
                         }
                         if !emitted_any_tool {
-                            pending_tool_ids.clear();
+                            strip_orphaned_tool_calls(
+                                &mut out,
+                                &mut pending_tool_ids,
+                                &mut last_tool_call_assistant_idx,
+                            );
                         }
                         // Text blocks co-located with tool_results (e.g. iteration-budget
                         // warnings, mid-turn user message injections) have no place in the
@@ -2152,7 +2222,11 @@ fn translate_messages_to_oai_with_reasoning(
                             out.push(json!({"role": "user", "content": extra_text}));
                         }
                     } else {
-                        pending_tool_ids.clear();
+                        strip_orphaned_tool_calls(
+                            &mut out,
+                            &mut pending_tool_ids,
+                            &mut last_tool_call_assistant_idx,
+                        );
                         // Images + text → multipart content array
                         let has_images = blocks
                             .iter()
@@ -2196,6 +2270,13 @@ fn translate_messages_to_oai_with_reasoning(
             }
         }
     }
+
+    // Final cleanup: strip unresolved tool_calls from trailing assistant
+    strip_orphaned_tool_calls(
+        &mut out,
+        &mut pending_tool_ids,
+        &mut last_tool_call_assistant_idx,
+    );
 
     out
 }
@@ -2628,22 +2709,32 @@ mod tests {
 
     #[test]
     fn test_translate_messages_assistant_tool_use() {
-        let msgs = vec![Message {
-            role: "assistant".into(),
-            content: MessageContent::Blocks(vec![
-                ContentBlock::Text {
-                    text: "Let me check.".into(),
-                },
-                ContentBlock::ToolUse {
-                    id: "t1".into(),
-                    name: "bash".into(),
-                    input: json!({"command": "ls"}),
-                    thought_signature: None,
-                },
-            ]),
-        }];
+        let msgs = vec![
+            Message {
+                role: "assistant".into(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "Let me check.".into(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "bash".into(),
+                        input: json!({"command": "ls"}),
+                        thought_signature: None,
+                    },
+                ]),
+            },
+            Message {
+                role: "user".into(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "ok".into(),
+                    is_error: None,
+                }]),
+            },
+        ];
         let out = translate_messages_to_oai("", &msgs);
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.len(), 2);
         assert_eq!(out[0]["role"], "assistant");
         assert_eq!(out[0]["content"], "Let me check.");
         let tc = out[0]["tool_calls"].as_array().unwrap();
@@ -2654,15 +2745,25 @@ mod tests {
 
     #[test]
     fn test_translate_messages_assistant_tool_use_includes_thought_signature() {
-        let msgs = vec![Message {
-            role: "assistant".into(),
-            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
-                id: "t1".into(),
-                name: "bash".into(),
-                input: json!({"command": "ls"}),
-                thought_signature: Some("sig_abc".into()),
-            }]),
-        }];
+        let msgs = vec![
+            Message {
+                role: "assistant".into(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "bash".into(),
+                    input: json!({"command": "ls"}),
+                    thought_signature: Some("sig_abc".into()),
+                }]),
+            },
+            Message {
+                role: "user".into(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "ok".into(),
+                    is_error: None,
+                }]),
+            },
+        ];
         let out = translate_messages_to_oai("", &msgs);
         let tc = out[0]["tool_calls"].as_array().unwrap();
         assert_eq!(
@@ -2673,15 +2774,25 @@ mod tests {
 
     #[test]
     fn test_translate_messages_assistant_tool_use_normalizes_stringified_json_input() {
-        let msgs = vec![Message {
-            role: "assistant".into(),
-            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
-                id: "t1".into(),
-                name: "web_search".into(),
-                input: json!("{\"query\":\"油价\"}"),
-                thought_signature: None,
-            }]),
-        }];
+        let msgs = vec![
+            Message {
+                role: "assistant".into(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "web_search".into(),
+                    input: json!("{\"query\":\"油价\"}"),
+                    thought_signature: None,
+                }]),
+            },
+            Message {
+                role: "user".into(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "ok".into(),
+                    is_error: None,
+                }]),
+            },
+        ];
 
         let out = translate_messages_to_oai("", &msgs);
         let tc = out[0]["tool_calls"].as_array().unwrap();
@@ -2703,28 +2814,159 @@ mod tests {
 
     #[test]
     fn test_translate_messages_assistant_tool_use_deepseek_reasoning() {
-        let msgs = vec![Message {
-            role: "assistant".into(),
-            content: MessageContent::Blocks(vec![
-                ContentBlock::Text {
-                    text: "reasoning".into(),
-                },
-                ContentBlock::ToolUse {
-                    id: "t1".into(),
-                    name: "bash".into(),
-                    input: json!({"command": "ls"}),
-                    thought_signature: None,
-                },
-            ]),
-        }];
+        let msgs = vec![
+            Message {
+                role: "assistant".into(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "reasoning".into(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "bash".into(),
+                        input: json!({"command": "ls"}),
+                        thought_signature: None,
+                    },
+                ]),
+            },
+            Message {
+                role: "user".into(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "ok".into(),
+                    is_error: None,
+                }]),
+            },
+        ];
         let out = translate_messages_to_oai_with_reasoning("", &msgs, true);
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.len(), 2);
         assert_eq!(out[0]["role"], "assistant");
         assert_eq!(out[0]["reasoning_content"], "reasoning");
         assert!(out[0]["content"].is_null());
         let tc = out[0]["tool_calls"].as_array().unwrap();
         assert_eq!(tc.len(), 1);
         assert_eq!(tc[0]["id"], "t1");
+    }
+
+    #[test]
+    fn test_translate_messages_orphaned_tool_calls_stripped_reasoning_bridge() {
+        // Compaction can split a tool_use from its tool_result across the summary
+        // boundary; the orphaned tool_calls must be stripped and the reasoning
+        // text folded back into content, or DeepSeek rejects the request.
+        let msgs = vec![
+            Message {
+                role: "assistant".into(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "thinking".into(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "bash".into(),
+                        input: json!({"command": "ls"}),
+                        thought_signature: None,
+                    },
+                ]),
+            },
+            Message {
+                role: "user".into(),
+                content: MessageContent::Text("continue".into()),
+            },
+        ];
+        let out = translate_messages_to_oai_with_reasoning("", &msgs, true);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].get("tool_calls").is_none());
+        assert!(out[0].get("reasoning_content").is_none());
+        assert_eq!(out[0]["content"], "thinking");
+        assert_eq!(out[1]["role"], "user");
+    }
+
+    #[test]
+    fn test_translate_messages_orphaned_tool_calls_stripped_trailing() {
+        let msgs = vec![Message {
+            role: "assistant".into(),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "bash".into(),
+                input: json!({"command": "ls"}),
+                thought_signature: None,
+            }]),
+        }];
+        let out = translate_messages_to_oai_with_reasoning("", &msgs, true);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].get("tool_calls").is_none());
+        assert_eq!(out[0]["content"], "");
+    }
+
+    #[test]
+    fn test_translate_messages_orphaned_tool_calls_plain_path_keeps_content() {
+        let msgs = vec![
+            Message {
+                role: "assistant".into(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "Let me check.".into(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "bash".into(),
+                        input: json!({"command": "ls"}),
+                        thought_signature: None,
+                    },
+                ]),
+            },
+            Message {
+                role: "user".into(),
+                content: MessageContent::Text("hi".into()),
+            },
+        ];
+        let out = translate_messages_to_oai("", &msgs);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].get("tool_calls").is_none());
+        assert_eq!(out[0]["content"], "Let me check.");
+    }
+
+    #[test]
+    fn test_translate_messages_partially_resolved_tool_calls_keep_resolved() {
+        let msgs = vec![
+            Message {
+                role: "assistant".into(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "bash".into(),
+                        input: json!({}),
+                        thought_signature: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t2".into(),
+                        name: "glob".into(),
+                        input: json!({}),
+                        thought_signature: None,
+                    },
+                ]),
+            },
+            Message {
+                role: "user".into(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "ok".into(),
+                    is_error: None,
+                }]),
+            },
+            Message {
+                role: "user".into(),
+                content: MessageContent::Text("continue".into()),
+            },
+        ];
+        let out = translate_messages_to_oai_with_reasoning("", &msgs, true);
+        // assistant + tool(t1) + user; only the unresolved t2 entry is stripped
+        assert_eq!(out.len(), 3);
+        let tc = out[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["id"], "t1");
+        assert_eq!(out[1]["role"], "tool");
+        assert_eq!(out[1]["tool_call_id"], "t1");
     }
 
     #[test]
